@@ -1,0 +1,143 @@
+from flask import Flask, request, jsonify
+import joblib
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+# Create Flask app
+app = Flask(_name_)
+
+# Load trained models, scaler, and thresholds
+lr_model = joblib.load(r"C:\Users\Pranav\Downloads\lr_model.pkl")
+rf_model = joblib.load(r"C:\Users\Pranav\Downloads\rf_model.pkl")
+scaler = joblib.load(r"C:\Users\Pranav\Downloads\scaler.pkl")
+thresholds = joblib.load(r"C:\Users\Pranav\Downloads\threshold.pkl")
+
+
+# Transaction tracking for velocity checks
+transaction_log = []
+VELOCITY_WINDOW = 10  # Seconds
+
+# Expected column order
+expected_cols = ['V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10',
+                 'V11', 'V12', 'V13', 'V14', 'V15', 'V16', 'V17', 'V18', 'V19',
+                 'V20', 'V21', 'V22', 'V23', 'V24', 'V25', 'V26', 'V27', 'V28', 'Amount']
+
+@app.route('/')
+def home():
+    return '''
+    <h1>Fraud Detection API</h1>
+    <p>Upload a CSV file with transaction data to check for fraud.</p>
+    <form method="POST" action="/predict" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".csv" required><br><br>
+        <input type="submit" value="Upload and Predict">
+    </form>
+    '''
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    try:
+        # Check if a file was uploaded
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        
+        print('hello')
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Read CSV file
+        df = pd.read_csv(file)
+
+        # Clean column names (remove spaces, fix case)
+        df.columns = df.columns.str.strip()
+
+        # Check for missing columns
+        missing_cols = [col for col in expected_cols if col not in df.columns]
+        if missing_cols:
+            return jsonify({'error': f'Missing columns: {", ".join(missing_cols)}'}), 400
+
+        # Drop extra columns if present
+        df = df[expected_cols]
+
+        # Scale the Amount column
+        df['Amount'] = scaler.transform(df[['Amount']])
+
+        # Track transaction velocity
+        now = datetime.now()
+        transaction_log.append((now, df))
+        transaction_log[:] = [(t, d) for t, d in transaction_log if now - t < timedelta(seconds=VELOCITY_WINDOW)]
+        velocity_count = len(transaction_log)
+
+        results = []  # Store predictions
+
+        # Process each transaction
+        for index, row in df.iterrows():
+            row_df = pd.DataFrame([row], columns=expected_cols)  # Ensure correct format
+
+            # Logistic Regression Prediction
+            lr_prob = lr_model.predict_proba(row_df)[0, 1]
+            lr_pred = 1 if lr_prob > thresholds['lr'] else 0
+
+            # Explanation context
+            context = "Legitimate transaction"
+            sms_alert = None
+
+            if lr_prob > 0.3:
+                amount_scaled = row_df['Amount'].values[0]
+                v14_value = row_df['V14'].values[0]
+                if amount_scaled < 0.1 and lr_prob > 0.5:
+                    context = "Likely skimming test (small amount, suspicious pattern)"
+                elif amount_scaled > 1.0 and lr_prob > 0.7:
+                    context = "Possible online theft (large amount, high risk)"
+                elif v14_value < -2.0:
+                    context += " - Strong behavioral anomaly (V14 signal)"
+
+            # Random Forest Refinement if uncertain
+            final_pred = lr_pred
+            final_prob = lr_prob
+            if 0.3 <= lr_prob <= 0.7:
+                rf_prob = rf_model.predict_proba(row_df)[0, 1]
+                final_pred = 1 if rf_prob > thresholds['rf'] else 0
+                final_prob = rf_prob
+                context += f" - Deep check: {'Confirmed fraud' if final_pred == 1 else 'Likely legit'}"
+
+            # Check transaction speed
+            if velocity_count > 3:
+                context += f" - High velocity detected ({velocity_count} transactions in {VELOCITY_WINDOW}s)"
+                if final_pred == 1 and sms_alert is None:
+                    sms_alert = f"Alert: High velocity fraud detected - {velocity_count} transactions flagged."
+
+            # Identify key fraud feature
+            if final_pred == 1:
+                lr_weights = lr_model.coef_[0]
+                feature_contribs = np.abs(lr_weights * row_df.iloc[0].values)
+                top_feature_idx = np.argmax(feature_contribs)
+                top_feature = expected_cols[top_feature_idx]
+                context += f" - Driven by {top_feature}"
+                if sms_alert is None:
+                    sms_alert = f"Alert: Fraud detected - Driven by {top_feature}."
+
+            # Simulate SMS alert
+            if sms_alert:
+                print(f"SMS Sent: {sms_alert}")
+
+            # Store result
+            results.append({
+                'transaction_id': index,
+                'prediction': 'Fraudulent' if final_pred == 1 else 'Legitimate',
+                'probability': float(final_prob),
+                'crime_context': context
+            })
+
+        return jsonify({
+            'total_transactions': len(df),
+            'results': results
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Start Flask server
+if _name_ == '_main_':
+    app.run(debug=True, host='0.0.0.0', port=5000)
