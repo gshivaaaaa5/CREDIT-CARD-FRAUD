@@ -1,0 +1,764 @@
+// ignore_for_file: library_private_types_in_public_api, avoid_print
+
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:http/http.dart' as http;
+import 'package:google_fonts/google_fonts.dart';
+
+void main() {
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Fraud Detection App',
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        primarySwatch: Colors.blue,
+        textTheme: GoogleFonts.poppinsTextTheme(),
+        scaffoldBackgroundColor: Colors.transparent,
+      ),
+      home: FileUploadScreen(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+class FileUploadScreen extends StatefulWidget {
+  const FileUploadScreen({super.key});
+
+  @override
+  _FileUploadScreenState createState() => _FileUploadScreenState();
+}
+
+class _FileUploadScreenState extends State<FileUploadScreen> {
+  File? _selectedFile;
+  String? _responseMessage;
+  List<Map<String, dynamic>> _transactions = [];
+  List<Map<String, dynamic>> _csvData = [];
+  bool _isLoading = false;
+  bool _showAlert = false;
+
+  Future<void> _pickFile() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+    );
+
+    if (result != null) {
+      setState(() {
+        _selectedFile = File(result.files.single.path!);
+        _responseMessage = null;
+        _transactions = [];
+        _csvData = [];
+      });
+    } else {
+      setState(() {
+        _responseMessage = 'No file selected.';
+      });
+    }
+  }
+
+  Future<void> _uploadFile() async {
+    if (_selectedFile == null) {
+      setState(() {
+        _responseMessage = 'Please select a file first.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _responseMessage = 'Processing...';
+      _showAlert = false;
+    });
+
+    try {
+      String csvContent = await _selectedFile!.readAsString();
+      List<String> lines = csvContent.split('\n');
+      if (lines.isEmpty) {
+        throw Exception('CSV file is empty');
+      }
+      List<String> headers = lines[0].split(',').map((h) => h.trim()).toList();
+      _csvData = [];
+      for (int i = 1; i < lines.length; i++) {
+        if (lines[i].trim().isEmpty) continue;
+        List<String> values = lines[i].split(',').map((v) => v.trim()).toList();
+        if (values.length == headers.length) {
+          _csvData.add(Map.fromIterables(headers, values));
+        } else {
+          print('Skipping row $i due to mismatch: ${lines[i]}');
+        }
+      }
+      print('Parsed CSV Data: $_csvData');
+
+      var request = http.MultipartRequest(
+        'POST',
+        Uri.parse('http://localhost:5000/predict'),
+      );
+      request.files.add(
+        await http.MultipartFile.fromPath('file', _selectedFile!.path),
+      );
+
+      var response = await request.send();
+      var responseBody = await response.stream.bytesToString();
+      var jsonResponse = jsonDecode(responseBody);
+
+      setState(() {
+        if (response.statusCode == 200) {
+          _responseMessage =
+              'Processed ${jsonResponse['total_transactions']} transactions.';
+          _transactions = List<Map<String, dynamic>>.from(
+            jsonResponse['results'],
+          );
+
+          for (var transaction in _transactions) {
+            int id = transaction['transaction_id'];
+            if (id >= 0 && id < _csvData.length) {
+              transaction.addAll(_csvData[id]);
+            } else {
+              print('Warning: Transaction ID $id out of bounds for _csvData');
+            }
+          }
+          print('Merged Transactions: $_transactions');
+
+          bool hasFraud = _transactions.any(
+            (transaction) => transaction['prediction'] == 'Fraudulent',
+          );
+          if (hasFraud) {
+            _showFraudAlert();
+            _triggerAlertAnimation();
+          }
+        } else {
+          _responseMessage = 'Error: ${jsonResponse['error']}';
+          _transactions = [];
+        }
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _responseMessage = 'Error: $e';
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _triggerAlertAnimation() {
+    setState(() {
+      _showAlert = true;
+    });
+
+    Future.delayed(Duration(seconds: 3), () {
+      setState(() {
+        _showAlert = false;
+      });
+    });
+  }
+
+  void _showFraudAlert() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(
+            '🚨 Fraud Detected!',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Text(
+            'One or more transactions have been flagged as fraudulent.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white),
+          ),
+          actions: [
+            Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text('OK', style: TextStyle(color: Colors.white)),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Heatmap color function
+  Color _getHeatmapColor(double probability) {
+    if (probability < 0.3) return Colors.green;
+    if (probability < 0.7) return Colors.yellow;
+    return Colors.red;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Fraud Detection'),
+        centerTitle: true,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+      ),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Colors.grey[900]!, Colors.black, Colors.blueGrey[900]!],
+          ),
+        ),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Animated Alert Symbol
+                AnimatedOpacity(
+                  opacity: _showAlert ? 1.0 : 0.0,
+                  duration: Duration(milliseconds: 500),
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.warning_rounded,
+                        size: 80,
+                        color: const Color.fromARGB(255, 245, 57, 44),
+                      ),
+                      Text(
+                        "Fraud Detected!",
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                SizedBox(height: 20),
+
+                // Buttons
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ElevatedButton(
+                      onPressed: _pickFile,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color.fromARGB(
+                          255,
+                          102,
+                          41,
+                          209,
+                        ),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 30,
+                          vertical: 15,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        textStyle: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      child: Text('📂 Browse CSV File'),
+                    ),
+
+                    SizedBox(height: 10),
+
+                    if (_selectedFile != null)
+                      Text(
+                        'Selected: ${_selectedFile!.path.split('/').last}',
+                        style: TextStyle(
+                          color: const Color.fromARGB(255, 253, 253, 253),
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+
+                    SizedBox(height: 20),
+
+                    ElevatedButton(
+                      onPressed: _uploadFile,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color.fromARGB(
+                          255,
+                          121,
+                          53,
+                          246,
+                        ),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 30,
+                          vertical: 15,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        textStyle: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      child: Text('📤 Upload and Predict'),
+                    ),
+                  ],
+                ),
+
+                SizedBox(height: 20),
+
+                if (_isLoading) CircularProgressIndicator(),
+
+                if (_responseMessage != null)
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Text(
+                      _responseMessage!,
+                      style: TextStyle(color: Colors.white, fontSize: 16),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+
+                SizedBox(height: 20),
+
+                // Transaction Details and Heatmap
+                if (_transactions.isNotEmpty)
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          // Transaction Containers Classified by Fraud Status
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Legitimate Transactions (Left Side)
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Legitimate Transactions',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    SizedBox(height: 10),
+                                    ListView.builder(
+                                      shrinkWrap: true,
+                                      physics: NeverScrollableScrollPhysics(),
+                                      itemCount:
+                                          _transactions
+                                              .where(
+                                                (t) =>
+                                                    t['prediction'] ==
+                                                    'Legitimate',
+                                              )
+                                              .length,
+                                      itemBuilder: (context, index) {
+                                        final legitTransactions =
+                                            _transactions
+                                                .where(
+                                                  (t) =>
+                                                      t['prediction'] ==
+                                                      'Legitimate',
+                                                )
+                                                .toList();
+                                        final transaction =
+                                            legitTransactions[index];
+                                        return Container(
+                                          margin: EdgeInsets.symmetric(
+                                            vertical: 10,
+                                            horizontal: 8,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              begin: Alignment.topLeft,
+                                              end: Alignment.bottomRight,
+                                              colors: [
+                                                Colors.green[700]!,
+                                                Colors.green[400]!,
+                                              ],
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              16,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black.withOpacity(
+                                                  0.3,
+                                                ),
+                                                spreadRadius: 2,
+                                                blurRadius: 8,
+                                                offset: Offset(0, 4),
+                                              ),
+                                            ],
+                                            border: Border.all(
+                                              color: Colors.greenAccent,
+                                              width: 1.5,
+                                            ),
+                                          ),
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(16.0),
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Row(
+                                                  mainAxisAlignment:
+                                                      MainAxisAlignment
+                                                          .spaceBetween,
+                                                  children: [
+                                                    Text(
+                                                      'Transaction ${transaction['transaction_id']}',
+                                                      style: TextStyle(
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        fontSize: 18,
+                                                        color: Colors.white,
+                                                        shadows: [
+                                                          Shadow(
+                                                            color:
+                                                                Colors.black45,
+                                                            blurRadius: 2,
+                                                            offset: Offset(
+                                                              1,
+                                                              1,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                    Container(
+                                                      padding:
+                                                          EdgeInsets.symmetric(
+                                                            horizontal: 8,
+                                                            vertical: 4,
+                                                          ),
+                                                      decoration: BoxDecoration(
+                                                        color: Colors.black
+                                                            .withOpacity(0.5),
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                              12,
+                                                            ),
+                                                      ),
+                                                      child: Text(
+                                                        '✅',
+                                                        style: TextStyle(
+                                                          fontSize: 16,
+                                                          color: Colors.white,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                                SizedBox(height: 8),
+                                                Text(
+                                                  'Status: Legitimate',
+                                                  style: TextStyle(
+                                                    fontSize: 16,
+                                                    color: Colors.white,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                                SizedBox(height: 4),
+                                                Text(
+                                                  'Probability: ${(transaction['probability'] * 100).toStringAsFixed(2)}%',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'Context: ${transaction['crime_context']}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'Amount: ${transaction['Amount'] ?? 'N/A'}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'V1: ${transaction['V1'] ?? 'N/A'}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'V14: ${transaction['V14'] ?? 'N/A'}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+
+                              // Fraudulent Transactions (Right Side)
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Text(
+                                      'Fraudulent Transactions',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                      textAlign: TextAlign.right,
+                                    ),
+                                    SizedBox(height: 10),
+                                    ListView.builder(
+                                      shrinkWrap: true,
+                                      physics: NeverScrollableScrollPhysics(),
+                                      itemCount:
+                                          _transactions
+                                              .where(
+                                                (t) =>
+                                                    t['prediction'] ==
+                                                    'Fraudulent',
+                                              )
+                                              .length,
+                                      itemBuilder: (context, index) {
+                                        final fraudTransactions =
+                                            _transactions
+                                                .where(
+                                                  (t) =>
+                                                      t['prediction'] ==
+                                                      'Fraudulent',
+                                                )
+                                                .toList();
+                                        final transaction =
+                                            fraudTransactions[index];
+                                        return Container(
+                                          margin: EdgeInsets.symmetric(
+                                            vertical: 10,
+                                            horizontal: 8,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              begin: Alignment.topLeft,
+                                              end: Alignment.bottomRight,
+                                              colors: [
+                                                Colors.red[700]!,
+                                                Colors.red[400]!,
+                                              ],
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              16,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black.withOpacity(
+                                                  0.3,
+                                                ),
+                                                spreadRadius: 2,
+                                                blurRadius: 8,
+                                                offset: Offset(0, 4),
+                                              ),
+                                            ],
+                                            border: Border.all(
+                                              color: Colors.redAccent,
+                                              width: 1.5,
+                                            ),
+                                          ),
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(16.0),
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Row(
+                                                  mainAxisAlignment:
+                                                      MainAxisAlignment
+                                                          .spaceBetween,
+                                                  children: [
+                                                    Text(
+                                                      'Transaction ${transaction['transaction_id']}',
+                                                      style: TextStyle(
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        fontSize: 18,
+                                                        color: Colors.white,
+                                                        shadows: [
+                                                          Shadow(
+                                                            color:
+                                                                Colors.black45,
+                                                            blurRadius: 2,
+                                                            offset: Offset(
+                                                              1,
+                                                              1,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                    Container(
+                                                      padding:
+                                                          EdgeInsets.symmetric(
+                                                            horizontal: 8,
+                                                            vertical: 4,
+                                                          ),
+                                                      decoration: BoxDecoration(
+                                                        color: Colors.black
+                                                            .withOpacity(0.5),
+                                                        borderRadius:
+                                                            BorderRadius.circular(
+                                                              12,
+                                                            ),
+                                                      ),
+                                                      child: Text(
+                                                        '🚨',
+                                                        style: TextStyle(
+                                                          fontSize: 16,
+                                                          color: Colors.white,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                                SizedBox(height: 8),
+                                                Text(
+                                                  'Status: Fraudulent',
+                                                  style: TextStyle(
+                                                    fontSize: 16,
+                                                    color: Colors.white,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                                SizedBox(height: 4),
+                                                Text(
+                                                  'Probability: ${(transaction['probability'] * 100).toStringAsFixed(2)}%',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'Context: ${transaction['crime_context']}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'Amount: ${transaction['Amount'] ?? 'N/A'}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'V1: ${transaction['V1'] ?? 'N/A'}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'V14: ${transaction['V14'] ?? 'N/A'}',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          SizedBox(height: 20),
+
+                          // Heatmap
+                          Text(
+                            'Fraud Probability Heatmap',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          SizedBox(height: 10),
+                          Container(
+                            height: 150,
+                            child: GridView.builder(
+                              shrinkWrap: true,
+                              physics: NeverScrollableScrollPhysics(),
+                              gridDelegate:
+                                  SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount:
+                                        _transactions.length < 5
+                                            ? _transactions.length
+                                            : 5,
+                                    childAspectRatio: 1,
+                                    crossAxisSpacing: 4,
+                                    mainAxisSpacing: 4,
+                                  ),
+                              itemCount: _transactions.length,
+                              itemBuilder: (context, index) {
+                                double probability = double.parse(
+                                  _transactions[index]['probability']
+                                      .toString(),
+                                );
+                                return Container(
+                                  decoration: BoxDecoration(
+                                    color: _getHeatmapColor(probability),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Center(
+                                    child: Text(
+                                      'ID: ${_transactions[index]['transaction_id']}\n${(probability * 100).toStringAsFixed(0)}%',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
