@@ -1,0 +1,72 @@
+import pandas as pd
+import numpy as np
+import zipfile
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, precision_recall_curve
+import joblib
+
+# Paths (update these to your local paths)
+zip_path = r"C:\Users\HP\Downloads\creditcard.csv.zip"
+extract_dir = r"C:\Users\HP\Downloads\creditcard_csv"
+
+# Extract ZIP
+if not os.path.exists(extract_dir):
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+
+# Load data
+csv_file_path = os.path.join(extract_dir, 'creditcard.csv')
+data = pd.read_csv(csv_file_path)
+
+# Preprocessing
+X = data.drop(columns=['Class', 'Time'])
+y = data['Class']
+scaler = StandardScaler()
+X['Amount'] = scaler.fit_transform(X[['Amount']])
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train models
+lr_model = LogisticRegression(max_iter=1000, class_weight='balanced')
+lr_model.fit(X_train, y_train)
+rf_model = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42)
+rf_model.fit(X_train, y_train)
+
+# Evaluate and find optimal threshold
+def find_optimal_threshold(model, X_test, y_test):
+    probs = model.predict_proba(X_test)[:, 1]
+    precision, recall, thresholds = precision_recall_curve(y_test, probs)
+    f1_scores = 2 * (precision * recall) / (precision + recall)
+    best_idx = np.argmax(f1_scores)
+    return thresholds[best_idx]
+
+lr_threshold = find_optimal_threshold(lr_model, X_test, y_test)
+rf_threshold = find_optimal_threshold(rf_model, X_test, y_test)
+print(f"LR Optimal Threshold: {lr_threshold:.3f}")
+print(f"RF Optimal Threshold: {rf_threshold:.3f}")
+
+# Generate heatmap for Logistic Regression confusion matrix
+lr_pred = (lr_model.predict_proba(X_test)[:, 1] > lr_threshold).astype(int)  # Use dynamic threshold
+cm = confusion_matrix(y_test, lr_pred)
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+plt.title('Confusion Matrix - Logistic Regression (Dynamic Threshold)')
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.show()
+
+# Save models, scaler, and thresholds
+joblib.dump(lr_model, 'lr_model.pkl')
+joblib.dump(rf_model, 'rf_model.pkl')
+joblib.dump(scaler, 'scaler.pkl')
+joblib.dump({'lr': lr_threshold, 'rf': rf_threshold}, 'thresholds.pkl')
+
+# Evaluation
+print("Logistic Regression:")
+print(classification_report(y_test, lr_model.predict(X_test)))
+print("Random Forest:")
+print(classification_report(y_test, rf_model.predict(X_test)))
